@@ -451,7 +451,7 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 			query.QueryServiceBridge{AsyncQueryService: m.queryController},
 		)
 
-		executor, executorMetrics := executor.NewExecutor(
+		executorInstance, executorMetrics := executor.NewExecutor(
 			m.log.With(zap.String("service", "task-executor")),
 			query.QueryServiceBridge{AsyncQueryService: m.queryController},
 			ts.UserService,
@@ -459,7 +459,8 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 			combinedTaskService,
 			executor.WithFlagger(m.flagger),
 		)
-		m.executor = executor
+		executorInstance.SetLimitFunc(executor.ConcurrencyLimit(executorInstance, fluxlang.DefaultService))
+		m.executor = executorInstance
 		m.reg.MustRegister(executorMetrics.PrometheusCollectors()...)
 		schLogger := m.log.With(zap.String("service", "task-scheduler"))
 
@@ -470,7 +471,7 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 				err error
 			)
 			sch, sm, err = scheduler.NewScheduler(
-				executor,
+				executorInstance,
 				taskbackend.NewSchedulableTaskService(m.kvService),
 				scheduler.WithOnErrorFn(func(ctx context.Context, taskID scheduler.ID, scheduledAt time.Time, err error) {
 					schLogger.Info(
@@ -499,7 +500,7 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 		taskCoord := coordinator.NewCoordinator(
 			coordLogger,
 			sch,
-			executor)
+			executorInstance)
 
 		taskSvc = middleware.New(combinedTaskService, taskCoord)
 		if err := taskbackend.TaskNotifyCoordinatorOfExisting(
@@ -508,7 +509,7 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 			combinedTaskService,
 			taskCoord,
 			func(ctx context.Context, taskID platform2.ID, runID platform2.ID) error {
-				_, err := executor.ResumeCurrentRun(ctx, taskID, runID)
+				_, err := executorInstance.ResumeCurrentRun(ctx, taskID, runID)
 				return err
 			},
 			coordLogger); err != nil {
